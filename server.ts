@@ -828,7 +828,9 @@ function getD1Database() {
           const res = await pgPoolInstance!.query(pgQuery, this.boundValues);
           return res.rows.length > 0 ? (res.rows[0] as T) : null;
         } catch (err: any) {
-          console.error('[Database Setup] Postgres SQL error:', err.message);
+          if (err.code !== '42701' && !err.message?.includes('already exists') && !err.message?.includes('zero-length delimited identifier')) {
+            console.error('[Database Setup] Postgres SQL error:', err.message);
+          }
           throw err;
         }
       }
@@ -840,7 +842,9 @@ function getD1Database() {
           await pgPoolInstance!.query(pgQuery, this.boundValues);
           return { success: true };
         } catch (err: any) {
-          console.error('[Database Setup] Postgres SQL error:', err.message);
+          if (err.code !== '42701' && !err.message?.includes('already exists') && !err.message?.includes('zero-length delimited identifier')) {
+            console.error('[Database Setup] Postgres SQL error:', err.message);
+          }
           throw err;
         }
       }
@@ -852,7 +856,9 @@ function getD1Database() {
           const res = await pgPoolInstance!.query(pgQuery, this.boundValues);
           return { results: res.rows as T[] };
         } catch (err: any) {
-          console.error('[Database Setup] Postgres SQL error:', err.message);
+          if (err.code !== '42701' && !err.message?.includes('already exists') && !err.message?.includes('zero-length delimited identifier')) {
+            console.error('[Database Setup] Postgres SQL error:', err.message);
+          }
           throw err;
         }
       }
@@ -1198,19 +1204,19 @@ async function startServer() {
   try {
      const db = getD1Database();
      if (db.prepare) {
-        await db.prepare('ALTER TABLE p2p_orders ADD COLUMN terms TEXT DEFAULT ""').run();
+        await db.prepare("ALTER TABLE p2p_orders ADD COLUMN terms TEXT DEFAULT ''").run();
      } else {
-        await db.query('ALTER TABLE p2p_orders ADD COLUMN terms TEXT DEFAULT ""');
+        await db.query("ALTER TABLE p2p_orders ADD COLUMN terms TEXT DEFAULT ''");
      }
   } catch (e) {}
 
   // Ensure Knex P2P columns exist in p2p_orders table
   const p2pExtraColumns = [
-    { name: 'merchant_name', type: 'TEXT DEFAULT ""' },
+    { name: 'merchant_name', type: "TEXT DEFAULT ''" },
     { name: 'min_limit', type: 'REAL DEFAULT 10.0' },
     { name: 'max_limit', type: 'REAL DEFAULT 5000.0' },
-    { name: 'payment_details', type: 'TEXT DEFAULT ""' },
-    { name: 'fiat_currency', type: 'TEXT DEFAULT "USD"' },
+    { name: 'payment_details', type: "TEXT DEFAULT ''" },
+    { name: 'fiat_currency', type: "TEXT DEFAULT 'USD'" },
     { name: 'is_verified', type: 'INTEGER DEFAULT 1' },
     { name: 'completion_rate', type: 'REAL DEFAULT 99.2' },
     { name: 'orders_count', type: 'INTEGER DEFAULT 1280' },
