@@ -177,14 +177,33 @@ export default function App() {
         if (data && data.success && data.user) {
           setCurrentUser(data.user);
           localStorage.setItem('knex_current_user', JSON.stringify(data.user));
+          if (data.user.email?.toLowerCase() === 'abbyruth818@gmail.com' || data.user.role === 'admin' || data.user.isAdmin) {
+            localStorage.setItem('knex_admin_session_token', token);
+            if (isDirectAdminUrl()) {
+              setIsAdminOpen(true);
+            }
+          }
         } else if (data && data.valid === false) {
           setCurrentUser(null);
           localStorage.removeItem('knex_current_user');
           localStorage.removeItem('knex_token');
+          localStorage.removeItem('knex_admin_session_token');
         }
       })
       .catch(err => console.warn('Session verification notice:', err?.message || err));
     }
+  }, []);
+
+  // Listen for navigation to /secure-admin/
+  useEffect(() => {
+    const checkRoute = () => {
+      if (isDirectAdminUrl()) {
+        setIsAdminOpen(true);
+      }
+    };
+    checkRoute();
+    window.addEventListener('popstate', checkRoute);
+    return () => window.removeEventListener('popstate', checkRoute);
   }, []);
 
   // Track platform visits & referrer routing
@@ -2908,15 +2927,20 @@ export default function App() {
   }, []);
 
   const handleUserUpdate = (user: any) => {
-    // Only clear user-specific storage on user switch
-    ['knex_account', 'knex_current_user', 'knex_trade_history'].forEach(key => localStorage.removeItem(key));
     console.log('DEBUG: handleUserUpdate called with:', user);
     
     if (user) {
       localStorage.setItem('knex_current_user', JSON.stringify(user));
-      if (user.email === 'abbyruth818@gmail.com' || user.role === 'admin') {
+      localStorage.removeItem('knex_logged_out');
+      if (user.email?.toLowerCase() === 'abbyruth818@gmail.com' || user.role === 'admin' || user.isAdmin) {
+        const token = localStorage.getItem('knex_token') || 'admin-secret-key';
+        localStorage.setItem('knex_admin_session_token', token);
         setIsAdminOpen(true);
       }
+    } else {
+      ['knex_account', 'knex_current_user', 'knex_trade_history', 'knex_token', 'knex_admin_session_token'].forEach(key => localStorage.removeItem(key));
+      localStorage.setItem('knex_logged_out', 'true');
+      setIsAdminOpen(false);
     }
     setCurrentUser(user);
 
@@ -4342,7 +4366,19 @@ export default function App() {
               <div className={`hidden sm:block h-6 w-[1px] ${isDark ? 'bg-slate-900' : 'bg-slate-200'}`} />
 
               {/* Complete User Module */}
-              <div className="relative">
+              <div className="flex items-center gap-1.5 sm:gap-2">
+                {currentUser && (currentUser.email?.toLowerCase() === 'abbyruth818@gmail.com' || currentUser.role === 'admin' || currentUser.isAdmin) && (
+                  <button 
+                    onClick={() => setIsAdminOpen(true)}
+                    className="flex items-center space-x-1 px-2 py-1 rounded-lg bg-yellow-500/15 hover:bg-yellow-500/25 border border-yellow-500/35 text-yellow-400 text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer shadow-sm shrink-0"
+                    title="Open Super Admin Console (/secure-admin/)"
+                  >
+                    <Shield className="w-3 h-3 text-yellow-400" />
+                    <span className="hidden sm:inline">Admin</span>
+                  </button>
+                )}
+
+                <div className="relative">
                 {currentUser ? (
                   <>
                     <button 
@@ -4372,9 +4408,15 @@ export default function App() {
                             <p className="text-[11px] sm:text-xs font-black text-slate-200 truncate">{currentUser?.fullName}</p>
                             <p className="text-[9px] sm:text-[10px] font-mono text-slate-450 truncate mt-0.5">{currentUser?.email}</p>
                             <div className="flex items-center space-x-1 mt-2">
-                              <span className="text-[7px] sm:text-[8px] bg-amber-500/20 text-amber-455 px-1.5 py-0.5 rounded font-black uppercase">
-                                VIP 2 Account
-                              </span>
+                              {(currentUser.email?.toLowerCase() === 'abbyruth818@gmail.com' || currentUser.role === 'admin' || currentUser.isAdmin) ? (
+                                <span className="text-[7px] sm:text-[8px] bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 px-1.5 py-0.5 rounded font-black uppercase">
+                                  SuperAdmin
+                                </span>
+                              ) : (
+                                <span className="text-[7px] sm:text-[8px] bg-amber-500/20 text-amber-455 px-1.5 py-0.5 rounded font-black uppercase">
+                                  VIP 2 Account
+                                </span>
+                              )}
                               <span className="text-[7px] sm:text-[8px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded font-black uppercase">
                                 Real Mode
                               </span>
@@ -4382,6 +4424,19 @@ export default function App() {
                           </div>
 
                           <div className="p-1.5 space-y-0.5 text-left">
+                            {(currentUser.email?.toLowerCase() === 'abbyruth818@gmail.com' || currentUser.role === 'admin' || currentUser.isAdmin) && (
+                              <button 
+                                onClick={() => {
+                                  setIsAdminOpen(true);
+                                  setIsUserMenuOpen(false);
+                                }}
+                                className="flex items-center space-x-2.5 w-full p-2 rounded-lg text-[11px] sm:text-xs font-bold text-yellow-400 bg-yellow-500/10 hover:bg-yellow-500/20 border border-yellow-500/20 transition-all cursor-pointer"
+                              >
+                                <Shield className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-yellow-400" />
+                                <span>Super Admin Console</span>
+                              </button>
+                            )}
+
                             <button 
                               onClick={() => {
                                 setIsSettingsOpen(true);
@@ -4425,9 +4480,8 @@ export default function App() {
                           <div className="p-1.5 text-left">
                             <button 
                               onClick={() => {
-                                setCurrentUser(null);
                                 setIsUserMenuOpen(false);
-                                triggerToast("Successfully logged out from storage session.", true);
+                                handleLogout();
                               }}
                               className="flex items-center space-x-2.5 w-full p-2 rounded-lg text-[11px] sm:text-xs font-bold text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer"
                             >
@@ -4447,6 +4501,7 @@ export default function App() {
                     Sign In
                   </button>
                 )}
+                </div>
               </div>
 
               {/* Theme toggle */}

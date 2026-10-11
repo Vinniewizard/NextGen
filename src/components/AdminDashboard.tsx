@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { X, Users, TrendingUp, DollarSign, ArrowDownCircle, BarChart2, Pin, PinOff, MessageSquare, Settings, Clock, Trash, Sparkles, Search, Globe, Shield, Ban, CheckCircle, UserCheck, UserX, Copy, Check, Megaphone, Share2, Camera } from 'lucide-react';
+import { X, Users, TrendingUp, DollarSign, ArrowDownCircle, BarChart2, Pin, PinOff, MessageSquare, Settings, Clock, Trash, Sparkles, Search, Globe, Shield, Ban, CheckCircle, UserCheck, UserX, Copy, Check, Megaphone, Share2, Camera, RefreshCw, Key } from 'lucide-react';
 import { AdminWhatsAppManager } from './AdminWhatsAppManager';
 import { AdminFacebookBotManager } from './AdminFacebookBotManager';
 import MarketingHub from './MarketingHub';
@@ -97,6 +97,31 @@ interface GameSettings {
   withdrawalsPaused?: boolean;
 }
 
+interface AdminSession {
+  sessionId: string;
+  userId: string;
+  email: string;
+  fullName: string;
+  deviceId: string;
+  ipAddress: string;
+  userAgent: string;
+  createdAt: string;
+  expiresAt: string;
+  lastActiveAt?: string;
+  isExpired: boolean;
+  isBanned: boolean;
+}
+
+interface SecurityLog {
+  id: string;
+  userId?: string;
+  userEmail: string;
+  action: string;
+  details: string;
+  ipAddress: string;
+  createdAt: string;
+}
+
 const PREBUILT_GUIDES = {
   overview: `<b>⚙️ KNEX Exchange - Operational Blueprint</b>\n\nKNEX is a high-performance synthetic options trading platform:\n\n• <b>Synthetic Price Feeds:</b> Features highly responsive tick indexes (e.g. MFLOW index) moving 24/7/365.\n• <b>Fast Options Expiration:</b> Enter transactions with expiration durations starting at just 10 seconds up to minutes.\n• <b>Calibrated Payouts:</b> Delivers profit yields of up to 95% on accurate price vector predictions (Rise/Fall).\n• <b>No-Risk Environment:</b> Preconditioned with fully managed demo training accounts.`,
   register: `<b>🚀 How to Register & Onboard on KNEX</b>\n\nFollow these quick steps to set up your trading profile:\n\n1. Visit the KNEX Web Application Portal.\n2. Click <b>Register/Get Started</b> and fill in your Full Name, Email, and Phone Number (M-Pesa supported).\n3. Claim your pre-loaded <b>$25,678.91 USD</b> practice demo credits immediately!\n4. Link your Telegram Handle in your Profile Tab inside the console to listen to real-time notification alerts.`,
@@ -130,7 +155,22 @@ export default function AdminDashboard({ isOpen, onClose, theme, triggerToast, i
   const [loginMethod, setLoginMethod] = useState<'creds' | 'key'>('creds');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'stats' | 'users' | 'deposits' | 'completed_deposits' | 'withdrawals' | 'p2p' | 'game' | 'telegram' | 'marketing' | 'visits'>('stats');
+  const [activeTab, setActiveTab] = useState<'stats' | 'users' | 'deposits' | 'completed_deposits' | 'withdrawals' | 'p2p' | 'game' | 'telegram' | 'marketing' | 'visits' | 'sessions' | 'audit'>('stats');
+  
+  // Advanced Session & Security State
+  const [adminSessions, setAdminSessions] = useState<AdminSession[]>([]);
+  const [adminSecurityLogs, setAdminSecurityLogs] = useState<SecurityLog[]>([]);
+  const [sessionSearchQuery, setSessionSearchQuery] = useState('');
+  const [logFilterAction, setLogFilterAction] = useState('ALL');
+  
+  // Quick User Action Modals
+  const [quickCreditUser, setQuickCreditUser] = useState<User | null>(null);
+  const [quickCreditAmount, setQuickCreditAmount] = useState('');
+  const [quickCreditType, setQuickCreditType] = useState<'demo' | 'real'>('real');
+  const [quickCreditMode, setQuickCreditMode] = useState<'add' | 'set'>('add');
+  const [quickResetUser, setQuickResetUser] = useState<User | null>(null);
+  const [quickResetNewPassword, setQuickResetNewPassword] = useState('');
+
   const [isMarketingStudioOpen, setIsMarketingStudioOpen] = useState(false);
   const [p2pOrders, setP2pOrders] = useState<any[]>([]);
   const [p2pTrades, setP2pTrades] = useState<any[]>([]);
@@ -518,15 +558,33 @@ export default function AdminDashboard({ isOpen, onClose, theme, triggerToast, i
     }
   };
 
-  // Auto-restore admin session from localStorage if previously authenticated
+  // Auto-restore admin session from localStorage or instant authentication for Abby Ruth / SuperAdmin
   useEffect(() => {
     if (!isOpen) return;
     try {
       const savedKey = localStorage.getItem('knex_admin_session_token');
-      if (savedKey && !isAuthenticated) {
-        setAdminKey(savedKey);
+      const savedUserStr = localStorage.getItem('knex_current_user');
+      const userToken = localStorage.getItem('knex_token');
+      let isAbby = false;
+      if (savedUserStr) {
+        try {
+          const u = JSON.parse(savedUserStr);
+          if (u.email?.toLowerCase() === 'abbyruth818@gmail.com' || u.role === 'admin' || u.isAdmin) {
+            isAbby = true;
+          }
+        } catch {}
+      }
+
+      const activeKey = savedKey || (isAbby ? (userToken || 'admin-secret-key') : '');
+      if (activeKey && !isAuthenticated) {
+        setAdminKey(activeKey);
         setIsAuthenticated(true);
-        fetchData(savedKey);
+        fetchData(activeKey);
+      } else if (isAbby && !isAuthenticated) {
+        const defaultAdminKey = 'admin-secret-key';
+        setAdminKey(defaultAdminKey);
+        setIsAuthenticated(true);
+        fetchData(defaultAdminKey);
       }
     } catch {}
   }, [isOpen]);
@@ -654,9 +712,11 @@ export default function AdminDashboard({ isOpen, onClose, theme, triggerToast, i
 
         // Fetch P2P orders & trades
         try {
-          const [p2pOrdRes, p2pTrdRes] = await Promise.all([
+          const [p2pOrdRes, p2pTrdRes, sessRes, logsRes] = await Promise.all([
             fetch('/api/admin/p2p/orders', { headers: { 'x-admin-key': key } }),
-            fetch('/api/admin/p2p/trades', { headers: { 'x-admin-key': key } })
+            fetch('/api/admin/p2p/trades', { headers: { 'x-admin-key': key } }),
+            fetch('/api/admin/sessions', { headers: { 'x-admin-key': key } }),
+            fetch('/api/admin/security-logs', { headers: { 'x-admin-key': key } })
           ]);
           if (p2pOrdRes.ok) {
             const oData = await p2pOrdRes.json();
@@ -666,8 +726,16 @@ export default function AdminDashboard({ isOpen, onClose, theme, triggerToast, i
             const tData = await p2pTrdRes.json();
             setP2pTrades(tData.trades || []);
           }
+          if (sessRes.ok) {
+            const sData = await sessRes.json();
+            setAdminSessions(sData.sessions || []);
+          }
+          if (logsRes.ok) {
+            const lData = await logsRes.json();
+            setAdminSecurityLogs(lData.logs || []);
+          }
         } catch (p2pErr) {
-          console.error('P2P fetch error:', p2pErr);
+          console.error('Auxiliary fetch error:', p2pErr);
         }
 
         setIsAuthenticated(true);
@@ -878,6 +946,7 @@ export default function AdminDashboard({ isOpen, onClose, theme, triggerToast, i
       const data = await res.json();
       if (res.ok && data.success && data.adminKey) {
         setAdminKey(data.adminKey);
+        localStorage.setItem('knex_admin_session_token', data.adminKey);
         fetchData(data.adminKey);
         triggerToast('Super Admin Session Authenticated!', true);
       } else {
@@ -888,6 +957,126 @@ export default function AdminDashboard({ isOpen, onClose, theme, triggerToast, i
       triggerToast('Admin Authentication Error: ' + err.message, false);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleQuickAbbyLogin = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: 'abbyruth818@gmail.com',
+          password: 'Wizard1*',
+          key: 'abbyruth818@gmail.com'
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success && data.adminKey) {
+        setAdminKey(data.adminKey);
+        localStorage.setItem('knex_admin_session_token', data.adminKey);
+        setIsAuthenticated(true);
+        fetchData(data.adminKey);
+        triggerToast('SuperAdmin Abby Ruth Authenticated Instantly!', true);
+      } else {
+        triggerToast(data.message || 'Failed to authenticate Abby Ruth session.', false);
+      }
+    } catch (err: any) {
+      triggerToast('Authentication error: ' + err.message, false);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRevokeSession = async (sessionId: string) => {
+    try {
+      const res = await fetch('/api/admin/sessions/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey },
+        body: JSON.stringify({ sessionId })
+      });
+      const data = await res.json();
+      if (data.success) {
+        triggerToast('Session terminated successfully.', true);
+        setAdminSessions(prev => prev.filter(s => s.sessionId !== sessionId));
+      } else {
+        triggerToast(data.message || 'Failed to revoke session.', false);
+      }
+    } catch (err: any) {
+      triggerToast('Error: ' + err.message, false);
+    }
+  };
+
+  const handleRevokeAllUserSessions = async (userId: string, email: string) => {
+    if (!window.confirm(`Force terminate ALL active sessions for ${email}?`)) return;
+    try {
+      const res = await fetch('/api/admin/sessions/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey },
+        body: JSON.stringify({ userId })
+      });
+      const data = await res.json();
+      if (data.success) {
+        triggerToast(`All active sessions for ${email} terminated.`, true);
+        setAdminSessions(prev => prev.filter(s => s.userId !== userId));
+      } else {
+        triggerToast(data.message || 'Failed to revoke user sessions.', false);
+      }
+    } catch (err: any) {
+      triggerToast('Error: ' + err.message, false);
+    }
+  };
+
+  const handleAdminResetPassword = async (userId: string, newPass: string) => {
+    if (!newPass || newPass.length < 6) {
+      triggerToast('Password must be at least 6 characters.', false);
+      return;
+    }
+    try {
+      const res = await fetch('/api/admin/users/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey },
+        body: JSON.stringify({ userId, newPassword: newPass })
+      });
+      const data = await res.json();
+      if (data.success) {
+        triggerToast('User password reset successfully!', true);
+        setQuickResetUser(null);
+        setQuickResetNewPassword('');
+        fetchData(adminKey);
+      } else {
+        triggerToast(data.message || 'Failed to reset password.', false);
+      }
+    } catch (err: any) {
+      triggerToast('Error: ' + err.message, false);
+    }
+  };
+
+  const handleQuickCredit = async () => {
+    if (!quickCreditUser || !quickCreditAmount) return;
+    try {
+      const res = await fetch('/api/admin/users/quick-credit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-key': adminKey },
+        body: JSON.stringify({
+          userId: quickCreditUser.id,
+          amount: quickCreditAmount,
+          accountType: quickCreditType,
+          mode: quickCreditMode
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        triggerToast(data.message || 'Balance updated!', true);
+        setQuickCreditUser(null);
+        setQuickCreditAmount('');
+        fetchData(adminKey);
+      } else {
+        triggerToast(data.message || 'Failed to update balance.', false);
+      }
+    } catch (err: any) {
+      triggerToast('Error: ' + err.message, false);
     }
   };
 
@@ -1189,6 +1378,23 @@ export default function AdminDashboard({ isOpen, onClose, theme, triggerToast, i
                   {loading ? 'Authenticating Session...' : 'Authenticate Admin Console'}
                 </button>
               </form>
+
+              <div className="pt-2">
+                <div className="relative flex py-2 items-center">
+                  <div className="flex-grow border-t border-slate-800"></div>
+                  <span className="flex-shrink mx-3 text-[10px] font-black uppercase tracking-widest text-slate-500">Instant Access</span>
+                  <div className="flex-grow border-t border-slate-800"></div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleQuickAbbyLogin}
+                  disabled={loading}
+                  className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl border border-yellow-500/40 bg-yellow-500/15 hover:bg-yellow-500/25 text-yellow-400 font-black text-xs uppercase tracking-wider transition-all cursor-pointer shadow-md"
+                >
+                  <Shield className="w-4 h-4 text-yellow-400" />
+                  <span>Instant Login as Abby Ruth (SuperAdmin)</span>
+                </button>
+              </div>
             </div>
           </div>
         ) : (
@@ -1232,6 +1438,8 @@ export default function AdminDashboard({ isOpen, onClose, theme, triggerToast, i
                 { id: 'completed_deposits', label: 'Completed Deposits', icon: ArrowDownCircle },
                 { id: 'withdrawals', label: 'Withdrawals', icon: ArrowDownCircle },
                 { id: 'p2p', label: 'P2P Escrow', icon: Sparkles },
+                { id: 'sessions', label: 'Live Sessions', icon: Shield },
+                { id: 'audit', label: 'Security Logs', icon: Clock },
                 { id: 'game', label: 'Game Control', icon: DollarSign },
                 { id: 'telegram', label: 'Social Bots', icon: BarChart2 },
                 { id: 'marketing', label: 'Marketing & Posters', icon: Megaphone },
@@ -1250,6 +1458,9 @@ export default function AdminDashboard({ isOpen, onClose, theme, triggerToast, i
                   >
                     <tab.icon className="h-3.5 w-3.5" />
                     <span>{tab.label}</span>
+                    {tab.id === 'sessions' && adminSessions.length > 0 && (
+                      <span className="bg-emerald-500 text-slate-950 text-[8px] font-black px-1.5 py-0.2 rounded-full leading-none">{adminSessions.length}</span>
+                    )}
                     {tab.id === 'deposits' && pendingDeposits.length > 0 && (
                       <span className="bg-red-500 text-white text-[8px] font-extrabold px-1.5 py-0.2 rounded-full leading-none">{pendingDeposits.length}</span>
                     )}
@@ -1676,6 +1887,44 @@ export default function AdminDashboard({ isOpen, onClose, theme, triggerToast, i
                                   {/* Actions */}
                                   <td className="p-3 text-center">
                                     <div className="flex items-center justify-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setQuickCreditUser(user);
+                                          setQuickCreditAmount('');
+                                          setQuickCreditType('real');
+                                          setQuickCreditMode('add');
+                                        }}
+                                        className="bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-400 font-bold px-2 py-1 rounded text-[10px] uppercase tracking-wider transition-all cursor-pointer flex items-center gap-1"
+                                        title="Quick credit user balance"
+                                      >
+                                        <DollarSign className="h-3 w-3" />
+                                        <span>Fund</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setQuickResetUser(user);
+                                          setQuickResetNewPassword('');
+                                        }}
+                                        className="bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/30 text-purple-400 font-bold px-2 py-1 rounded text-[10px] uppercase tracking-wider transition-all cursor-pointer flex items-center gap-1"
+                                        title="Directly reset password"
+                                      >
+                                        <Key className="h-3 w-3" />
+                                        <span>Reset PW</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setActiveTab('sessions');
+                                          setSessionSearchQuery(user.email);
+                                        }}
+                                        className="bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-400 font-bold px-2 py-1 rounded text-[10px] uppercase tracking-wider transition-all cursor-pointer flex items-center gap-1"
+                                        title="Inspect user sessions"
+                                      >
+                                        <Shield className="h-3 w-3" />
+                                        <span>Sessions</span>
+                                      </button>
                                       <button
                                         type="button"
                                         onClick={() => handleToggleBanUser(user)}
@@ -3710,7 +3959,376 @@ export default function AdminDashboard({ isOpen, onClose, theme, triggerToast, i
                   </div>
                 </div>
               )}
+
+              {/* ======================================================== */}
+              {/* LIVE USER SESSIONS TAB */}
+              {/* ======================================================== */}
+              {activeTab === 'sessions' && (
+                <div className="space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-4 dark:border-slate-800">
+                    <div>
+                      <h3 className="text-lg font-bold flex items-center gap-2">
+                        <Shield className="h-5 w-5 text-emerald-400" />
+                        Live User Sessions & Security Enforcement
+                      </h3>
+                      <p className="text-xs text-slate-500">
+                        Monitor active logins, IP addresses, browser agents, and revoke suspicious sessions in real-time.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="relative">
+                        <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-2.5 pointer-events-none" />
+                        <input
+                          type="text"
+                          value={sessionSearchQuery}
+                          onChange={(e) => setSessionSearchQuery(e.target.value)}
+                          placeholder="Search email, IP, or UID..."
+                          className="pl-8 pr-3 py-1.5 rounded-lg text-xs bg-slate-900 border border-slate-800 text-white focus:border-yellow-500 focus:outline-none w-56 font-mono"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => fetchData(adminKey)}
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Clock className="h-3.5 w-3.5" />
+                        <span>Refresh</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Sessions Statistics Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="p-3.5 rounded-xl border border-slate-800 bg-slate-900/30">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">Total Active Sessions</span>
+                      <p className="text-2xl font-black font-mono text-emerald-400 mt-1">{adminSessions.filter(s => !s.isExpired).length}</p>
+                      <p className="text-[9px] text-slate-500">Currently valid authentication tokens</p>
+                    </div>
+                    <div className="p-3.5 rounded-xl border border-slate-800 bg-slate-900/30">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">Unique Authenticated Users</span>
+                      <p className="text-2xl font-black font-mono text-cyan-400 mt-1">{new Set(adminSessions.map(s => s.userId)).size}</p>
+                      <p className="text-[9px] text-slate-500">Distinct user accounts with open sessions</p>
+                    </div>
+                    <div className="p-3.5 rounded-xl border border-slate-800 bg-slate-900/30">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">Unique IP Endpoints</span>
+                      <p className="text-2xl font-black font-mono text-purple-400 mt-1">{new Set(adminSessions.map(s => s.ipAddress)).size}</p>
+                      <p className="text-[9px] text-slate-500">Distinct client network addresses</p>
+                    </div>
+                  </div>
+
+                  {/* Sessions Table */}
+                  <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                    <table className="w-full text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-slate-900 border-b border-slate-800 text-slate-400 font-bold uppercase tracking-wider">
+                          <th className="p-3 text-left">User</th>
+                          <th className="p-3 text-left">IP Address</th>
+                          <th className="p-3 text-left">Client & Browser</th>
+                          <th className="p-3 text-left">Created</th>
+                          <th className="p-3 text-left">Last Activity</th>
+                          <th className="p-3 text-center">Status</th>
+                          <th className="p-3 text-center">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800">
+                        {adminSessions
+                          .filter(s => {
+                            if (!sessionSearchQuery) return true;
+                            const q = sessionSearchQuery.toLowerCase();
+                            return (
+                              s.email.toLowerCase().includes(q) ||
+                              s.ipAddress.toLowerCase().includes(q) ||
+                              s.userId.toLowerCase().includes(q) ||
+                              (s.fullName && s.fullName.toLowerCase().includes(q))
+                            );
+                          })
+                          .map((sess) => (
+                            <tr key={sess.sessionId} className="hover:bg-slate-900/40 bg-slate-950/20 transition-colors">
+                              <td className="p-3">
+                                <div className="font-bold text-white">{sess.fullName || 'User'}</div>
+                                <div className="text-[10px] font-mono text-yellow-500">{sess.email}</div>
+                                <div className="text-[9px] font-mono text-slate-500">ID: {sess.sessionId}</div>
+                              </td>
+                              <td className="p-3 font-mono">
+                                <span className="px-2 py-0.5 rounded bg-slate-800 text-cyan-300 font-bold border border-slate-700">
+                                  {sess.ipAddress}
+                                </span>
+                              </td>
+                              <td className="p-3 max-w-[200px] truncate text-slate-300" title={sess.userAgent}>
+                                {sess.userAgent}
+                              </td>
+                              <td className="p-3 text-slate-400 whitespace-nowrap">
+                                {new Date(sess.createdAt).toLocaleString()}
+                              </td>
+                              <td className="p-3 text-slate-300 font-mono whitespace-nowrap">
+                                {sess.lastActiveAt ? new Date(sess.lastActiveAt).toLocaleTimeString() : 'N/A'}
+                              </td>
+                              <td className="p-3 text-center">
+                                {sess.isExpired ? (
+                                  <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-bold text-[9px] uppercase">
+                                    Expired
+                                  </span>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold text-[9px] uppercase border border-emerald-500/30">
+                                    Active
+                                  </span>
+                                )}
+                              </td>
+                              <td className="p-3 text-center">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRevokeSession(sess.sessionId)}
+                                    className="px-2.5 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-400 text-[10px] font-black uppercase tracking-wider transition cursor-pointer"
+                                    title="Terminate this session immediately"
+                                  >
+                                    Terminate
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRevokeAllUserSessions(sess.userId, sess.email)}
+                                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold uppercase tracking-wider transition cursor-pointer"
+                                    title="Revoke all active sessions for this user"
+                                  >
+                                    Revoke All
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        {adminSessions.length === 0 && (
+                          <tr>
+                            <td colSpan={7} className="text-center py-8 text-xs text-slate-500 italic">
+                              No active user sessions recorded in the database.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* ======================================================== */}
+              {/* SECURITY AUDIT LOGS TAB */}
+              {/* ======================================================== */}
+              {activeTab === 'audit' && (
+                <div className="space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-4 dark:border-slate-800">
+                    <div>
+                      <h3 className="text-lg font-bold flex items-center gap-2">
+                        <Clock className="h-5 w-5 text-amber-400" />
+                        System Security & Authentication Audit Trail
+                      </h3>
+                      <p className="text-xs text-slate-500">
+                        Immutable event log for authentications, password resets, administrative changes, and balance modifications.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={logFilterAction}
+                        onChange={(e) => setLogFilterAction(e.target.value)}
+                        className="px-3 py-1.5 rounded-lg text-xs bg-slate-900 border border-slate-800 text-white font-mono cursor-pointer"
+                      >
+                        <option value="ALL">All Actions</option>
+                        <option value="LOGIN">LOGIN</option>
+                        <option value="REGISTER">REGISTER</option>
+                        <option value="PASSWORD_RESET">PASSWORD_RESET</option>
+                        <option value="LOGOUT">LOGOUT</option>
+                        <option value="SESSION_REVOKE">SESSION_REVOKE</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => fetchData(adminKey)}
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        <span>Refresh</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                    <table className="w-full text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-slate-900 border-b border-slate-800 text-slate-400 font-bold uppercase tracking-wider">
+                          <th className="p-3 text-left">Time</th>
+                          <th className="p-3 text-left">Action</th>
+                          <th className="p-3 text-left">Target User</th>
+                          <th className="p-3 text-left">Details</th>
+                          <th className="p-3 text-left">Client IP</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800">
+                        {adminSecurityLogs
+                          .filter(l => logFilterAction === 'ALL' || l.action.toUpperCase().includes(logFilterAction))
+                          .map((log) => {
+                            const isLogin = log.action.includes('LOGIN');
+                            const isReg = log.action.includes('REGISTER');
+                            const isReset = log.action.includes('RESET') || log.action.includes('PASSWORD');
+                            return (
+                              <tr key={log.id} className="hover:bg-slate-900/40 bg-slate-950/20 transition-colors">
+                                <td className="p-3 text-slate-400 font-mono whitespace-nowrap">
+                                  {new Date(log.createdAt).toLocaleString()}
+                                </td>
+                                <td className="p-3">
+                                  <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase font-mono tracking-wider ${
+                                    isReg ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' :
+                                    isLogin ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' :
+                                    isReset ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' :
+                                    'bg-slate-800 text-slate-300'
+                                  }`}>
+                                    {log.action}
+                                  </span>
+                                </td>
+                                <td className="p-3 text-white font-mono font-semibold">
+                                  {log.userEmail}
+                                </td>
+                                <td className="p-3 text-slate-300">
+                                  {log.details}
+                                </td>
+                                <td className="p-3 font-mono text-cyan-400">
+                                  {log.ipAddress}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        {adminSecurityLogs.length === 0 && (
+                          <tr>
+                            <td colSpan={5} className="text-center py-8 text-xs text-slate-500 italic">
+                              No security audit entries recorded yet.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
+
+        {/* Quick Fund/Credit Modal */}
+        {quickCreditUser && (
+          <div className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-slate-900 border border-slate-700 rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <h3 className="text-sm font-black text-yellow-400 uppercase tracking-wider flex items-center gap-2">
+                  <DollarSign className="h-4 w-4" />
+                  Quick Balance Adjustment
+                </h3>
+                <button onClick={() => setQuickCreditUser(null)} className="text-slate-400 hover:text-white cursor-pointer">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="p-3 bg-slate-950 rounded-lg text-xs space-y-1">
+                <p className="font-bold text-white">{quickCreditUser.fullName}</p>
+                <p className="font-mono text-slate-400">{quickCreditUser.email}</p>
+                <div className="flex gap-4 mt-2 font-mono text-[11px]">
+                  <span>Demo: <b className="text-yellow-400">${formatMoney(quickCreditUser.demoBalance)}</b></span>
+                  <span>Real: <b className="text-emerald-400">${formatMoney(quickCreditUser.realBalance)}</b></span>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[10px] uppercase font-black text-slate-400 block mb-1">Target Wallet</label>
+                  <select
+                    value={quickCreditType}
+                    onChange={(e: any) => setQuickCreditType(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-white cursor-pointer"
+                  >
+                    <option value="real">Real Account (Live)</option>
+                    <option value="demo">Demo Account (Practice)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase font-black text-slate-400 block mb-1">Operation</label>
+                  <select
+                    value={quickCreditMode}
+                    onChange={(e: any) => setQuickCreditMode(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-white cursor-pointer"
+                  >
+                    <option value="add">Add to Balance (+)</option>
+                    <option value="set">Set Exact Balance (=)</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="text-[10px] uppercase font-black text-slate-400 block mb-1">Amount ($ USD)</label>
+                <input
+                  type="number"
+                  step="any"
+                  value={quickCreditAmount}
+                  onChange={(e) => setQuickCreditAmount(e.target.value)}
+                  placeholder="e.g. 500.00"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-sm font-mono text-white focus:border-yellow-500 focus:outline-none"
+                />
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setQuickCreditUser(null)}
+                  className="flex-1 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleQuickCredit}
+                  className="flex-1 py-2 rounded-lg bg-yellow-500 hover:bg-yellow-400 text-slate-950 text-xs font-black uppercase tracking-wider cursor-pointer shadow-md shadow-yellow-500/20"
+                >
+                  Confirm Credit
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Quick Reset Password Modal */}
+        {quickResetUser && (
+          <div className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-slate-900 border border-slate-700 rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <h3 className="text-sm font-black text-yellow-400 uppercase tracking-wider flex items-center gap-2">
+                  <Key className="h-4 w-4" />
+                  Direct Password Override
+                </h3>
+                <button onClick={() => setQuickResetUser(null)} className="text-slate-400 hover:text-white cursor-pointer">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="p-3 bg-slate-950 rounded-lg text-xs space-y-1">
+                <p className="font-bold text-white">{quickResetUser.fullName}</p>
+                <p className="font-mono text-slate-400">{quickResetUser.email}</p>
+              </div>
+              <div>
+                <label className="text-[10px] uppercase font-black text-slate-400 block mb-1">New Password (Min 6 chars)</label>
+                <input
+                  type="text"
+                  value={quickResetNewPassword}
+                  onChange={(e) => setQuickResetNewPassword(e.target.value)}
+                  placeholder="Enter new password (e.g. Trader2026!)"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-sm font-mono text-white focus:border-yellow-500 focus:outline-none"
+                />
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setQuickResetUser(null)}
+                  className="flex-1 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleAdminResetPassword(quickResetUser.id, quickResetNewPassword)}
+                  className="flex-1 py-2 rounded-lg bg-yellow-500 hover:bg-yellow-400 text-slate-950 text-xs font-black uppercase tracking-wider cursor-pointer shadow-md shadow-yellow-500/20"
+                >
+                  Update Password
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Inspect P2P Dispute Chat Modal */}
         {selectedDisputeChat && (
