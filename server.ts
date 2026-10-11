@@ -621,6 +621,8 @@ function getD1Database() {
             google_name TEXT,
             google_picture TEXT,
             google_id TEXT,
+            totp_secret TEXT,
+            anti_phishing_code TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -632,6 +634,8 @@ function getD1Database() {
           ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS google_name TEXT;
           ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS google_picture TEXT;
           ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS google_id TEXT;
+          ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS totp_secret TEXT;
+          ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS anti_phishing_code TEXT;
 
           CREATE TABLE IF NOT EXISTS credited_deposits (
             tx_hash TEXT PRIMARY KEY,
