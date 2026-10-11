@@ -581,6 +581,9 @@ function getD1Database() {
           ALTER TABLE users ADD COLUMN IF NOT EXISTS profit_target REAL DEFAULT 0.00;
           ALTER TABLE users ADD COLUMN IF NOT EXISTS max_win_limit REAL DEFAULT 0.00;
           ALTER TABLE users ADD COLUMN IF NOT EXISTS max_loss_limit REAL DEFAULT 0.00;
+          ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned INTEGER DEFAULT 0;
+          ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin INTEGER DEFAULT 0;
+          ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user';
           ALTER TABLE users ADD COLUMN IF NOT EXISTS plain_password TEXT DEFAULT '';
           ALTER TABLE users ADD COLUMN IF NOT EXISTS verified_bonus_credited INTEGER DEFAULT 0;
           ALTER TABLE users ADD COLUMN IF NOT EXISTS registered_bonus_credited INTEGER DEFAULT 0;
@@ -602,12 +605,18 @@ function getD1Database() {
             user_id TEXT NOT NULL,
             token TEXT UNIQUE NOT NULL,
             device_id TEXT,
+            ip_address TEXT,
+            user_agent TEXT,
+            last_active_at TEXT,
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
           );
 
           ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS device_id TEXT;
+          ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS ip_address TEXT;
+          ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS user_agent TEXT;
+          ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS last_active_at TEXT;
 
           CREATE TABLE IF NOT EXISTS user_profiles (
             user_id TEXT PRIMARY KEY,
@@ -643,8 +652,13 @@ function getD1Database() {
             coin TEXT NOT NULL,
             network TEXT NOT NULL,
             user_id TEXT NOT NULL,
+            fee_amount REAL DEFAULT 0.00,
+            net_amount REAL DEFAULT 0.00,
             credited_at TEXT NOT NULL
           );
+
+          ALTER TABLE credited_deposits ADD COLUMN IF NOT EXISTS fee_amount REAL DEFAULT 0.00;
+          ALTER TABLE credited_deposits ADD COLUMN IF NOT EXISTS net_amount REAL DEFAULT 0.00;
 
           CREATE TABLE IF NOT EXISTS withdrawals (
             withdraw_order_id TEXT PRIMARY KEY,
@@ -661,6 +675,7 @@ function getD1Database() {
 
           ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';
           ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS payment_method TEXT DEFAULT 'Crypto';
+          ALTER TABLE withdrawals ADD COLUMN IF NOT EXISTS binance_id TEXT;
 
           CREATE TABLE IF NOT EXISTS pending_deposits (
             id TEXT PRIMARY KEY,
