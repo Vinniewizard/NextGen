@@ -254,10 +254,13 @@ export default function AuthModal({ isOpen, onClose, theme, onSuccess, initialVi
       .then((data) => {
         setIsLoading(false);
         setSuccessMsg(data.message || 'Reset code sent to your email.');
+        if (data.devOtp) {
+          setResetToken(data.devOtp);
+        }
         setTimeout(() => {
           setView('reset_password');
           setSuccessMsg('');
-        }, 2000);
+        }, 1500);
       })
       .catch((err) => {
         setFormError(err.message || 'Network error occurred. Please try again.');
@@ -265,8 +268,8 @@ export default function AuthModal({ isOpen, onClose, theme, onSuccess, initialVi
       });
       
     } else if (view === 'reset_password') {
-      if (password.length < 8) {
-        setFormError('New password must be at least 8 characters long.');
+      if (password.length < 6) {
+        setFormError('New password must be at least 6 characters long.');
         setIsLoading(false);
         return;
       }
@@ -279,7 +282,12 @@ export default function AuthModal({ isOpen, onClose, theme, onSuccess, initialVi
       fetch('/api/auth/reset-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: cleanEmail, otp: resetToken, newPassword: password })
+        body: JSON.stringify({ 
+          email: cleanEmail, 
+          otp: resetToken.trim(), 
+          token: resetToken.trim(), 
+          newPassword: password 
+        })
       })
       .then(async (res) => {
         const data = await res.json();
@@ -415,23 +423,44 @@ export default function AuthModal({ isOpen, onClose, theme, onSuccess, initialVi
                 </div>
               )}
 
-              {/* Reset Token Field */}
+              {/* Reset Account Email & Token Fields */}
               {view === 'reset_password' && (
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
-                    Reset Token / OTP
-                  </label>
-                  <div className="relative">
-                    <input
-                      type="text"
-                      required
-                      value={resetToken}
-                      onChange={(e) => setResetToken(e.target.value)}
-                      className="block w-full px-3.5 py-2.5 rounded-xl text-sm bg-[#0b0e11] border border-[#2b313a] text-white focus:border-yellow-400 focus:outline-none transition-all font-mono"
-                      placeholder="Paste 6-digit verification code"
-                    />
+                <>
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-300 flex items-center justify-between">
+                      <span>Account Email</span>
+                    </label>
+                    <div className="relative">
+                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                        <Mail className="h-4 w-4" />
+                      </div>
+                      <input
+                        type="email"
+                        required
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        className="block w-full pl-10 pr-3.5 py-2.5 rounded-xl text-sm bg-[#0b0e11] border border-[#2b313a] text-white focus:border-yellow-400 focus:outline-none transition-all"
+                        placeholder="your.email@domain.com"
+                      />
+                    </div>
                   </div>
-                </div>
+
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+                      Reset Verification Code / OTP
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        required
+                        value={resetToken}
+                        onChange={(e) => setResetToken(e.target.value)}
+                        className="block w-full px-3.5 py-2.5 rounded-xl text-sm bg-[#0b0e11] border border-[#2b313a] text-white focus:border-yellow-400 focus:outline-none transition-all font-mono tracking-widest text-center text-base"
+                        placeholder="6-digit code"
+                      />
+                    </div>
+                  </div>
+                </>
               )}
 
               {/* Email / Identifier Field */}

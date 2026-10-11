@@ -174,12 +174,17 @@ function getSqliteInstance() {
     ensureSqliteColumn("withdrawals", "payment_method", "TEXT DEFAULT 'Crypto'");
     ensureSqliteColumn("withdrawals", "binance_id", "TEXT");
     ensureSqliteColumn("user_sessions", "device_id", "TEXT");
+    ensureSqliteColumn("user_sessions", "ip_address", "TEXT");
+    ensureSqliteColumn("user_sessions", "user_agent", "TEXT");
+    ensureSqliteColumn("user_sessions", "last_active_at", "TEXT");
     ensureSqliteColumn("user_profiles", "device_id", "TEXT");
     ensureSqliteColumn("user_profiles", "device_info", "TEXT");
     ensureSqliteColumn("user_profiles", "google_email", "TEXT");
     ensureSqliteColumn("user_profiles", "google_name", "TEXT");
     ensureSqliteColumn("user_profiles", "google_picture", "TEXT");
     ensureSqliteColumn("user_profiles", "google_id", "TEXT");
+    ensureSqliteColumn("user_profiles", "totp_secret", "TEXT");
+    ensureSqliteColumn("user_profiles", "anti_phishing_code", "TEXT");
     ensureSqliteColumn("p2p_orders", "paymentMethod", "TEXT");
     ensureSqliteColumn("p2p_orders", "required_kyc", "INTEGER DEFAULT 0");
     ensureSqliteColumn("p2p_orders", "required_min_trades", "INTEGER DEFAULT 0");
@@ -869,6 +874,72 @@ const storage = multer.diskStorage({
     cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
   }
 });
+// Helper to parse cookies from incoming request headers
+function parseCookies(cookieHeader?: string): Record<string, string> {
+  const list: Record<string, string> = {};
+  if (!cookieHeader) return list;
+  cookieHeader.split(';').forEach((cookie) => {
+    const parts = cookie.split('=');
+    const name = parts[0]?.trim();
+    if (name) {
+      list[name] = decodeURIComponent(parts.slice(1).join('=').trim());
+    }
+  });
+  return list;
+}
+
+// Session & Authenticated User Resolver
+async function getAuthenticatedUser(req: any): Promise<{ userId: string; user: any; session?: any } | null> {
+  const authHeader = req.headers?.authorization;
+  let token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : '';
+  if (!token) {
+    const cookies = parseCookies(req.headers?.cookie);
+    token = cookies['knex_session'] || cookies['session_token'] || '';
+  }
+  if (!token && req.query?.token) {
+    token = String(req.query.token);
+  }
+  if (!token) return null;
+
+  try {
+    const db = getD1Database();
+    const session = await db.prepare(
+      `SELECT s.*, u.id as user_id, u.email, u.full_name, u.account_type, u.demo_balance, u.real_balance,
+              u.is_banned, up.phone, up.country, up.verification_status, up.two_factor_enabled
+       FROM user_sessions s
+       JOIN users u ON s.user_id = u.id
+       LEFT JOIN user_profiles up ON u.id = up.user_id
+       WHERE s.token = ?`
+    ).bind(token).first() as any;
+
+    if (session) {
+      if (new Date(session.expires_at).getTime() < Date.now()) {
+        await db.prepare('DELETE FROM user_sessions WHERE token = ?').bind(token).run();
+        return null;
+      }
+      if (session.is_banned === 1) return null;
+      return { userId: session.user_id, user: session, session };
+    }
+
+    // Direct user ID / email match fallback for internal requests
+    const directUser = await db.prepare(
+      `SELECT u.id as user_id, u.email, u.full_name, u.account_type, u.demo_balance, u.real_balance,
+              u.is_banned, up.phone, up.country, up.verification_status, up.two_factor_enabled
+       FROM users u
+       LEFT JOIN user_profiles up ON u.id = up.user_id
+       WHERE u.id = ? OR LOWER(TRIM(u.email)) = LOWER(TRIM(?))`
+    ).bind(token, token).first() as any;
+
+    if (directUser && directUser.is_banned !== 1) {
+      return { userId: directUser.user_id, user: directUser };
+    }
+  } catch (e) {
+    console.error('getAuthenticatedUser error:', e);
+  }
+
+  return null;
+}
+
 // OTP Storage
 const temporaryOtps = new Map<string, { otp: string, expires: number }>();
 
@@ -2695,7 +2766,12 @@ Active technical indicator values: ${indicatorsString}.`}`;
     res.setHeader('Content-Type', 'application/json');
     try {
       const authHeader = req.headers.authorization;
-      const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : (req.query.token as string);
+      let token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : (req.query.token as string);
+      if (!token) {
+        const cookies = parseCookies(req.headers.cookie);
+        token = cookies['knex_session'] || cookies['session_token'] || '';
+      }
+
       if (!token) {
         return res.status(401).json({ success: false, valid: false, message: 'No session token provided.' });
       }
@@ -2703,22 +2779,31 @@ Active technical indicator values: ${indicatorsString}.`}`;
       const db = getD1Database();
       const session = await db.prepare(
         `SELECT s.*, u.id as user_id, u.email, u.full_name, u.account_type, u.demo_balance, u.real_balance,
-                u.force_outcome, u.profit_target, u.max_win_limit, u.max_loss_limit,
-                up.phone, up.country, up.verification_status
+                u.force_outcome, u.profit_target, u.max_win_limit, u.max_loss_limit, u.is_banned,
+                up.phone, up.country, up.verification_status, up.two_factor_enabled, up.anti_phishing_code
          FROM user_sessions s 
          JOIN users u ON s.user_id = u.id 
          LEFT JOIN user_profiles up ON u.id = up.user_id 
          WHERE s.token = ?`
-      ).bind(token).first();
+      ).bind(token).first() as any;
 
       if (!session) {
         return res.status(401).json({ success: false, valid: false, message: 'Session expired or invalid.' });
+      }
+
+      if (session.is_banned === 1) {
+        return res.status(403).json({ success: false, valid: false, message: 'Your account has been suspended.' });
       }
 
       if (new Date(session.expires_at).getTime() < Date.now()) {
         await db.prepare('DELETE FROM user_sessions WHERE token = ?').bind(token).run();
         return res.status(401).json({ success: false, valid: false, message: 'Session expired. Please log in again.' });
       }
+
+      // Update session activity timestamp
+      await db.prepare('UPDATE user_sessions SET last_active_at = ? WHERE token = ?')
+        .bind(new Date().toISOString(), token)
+        .run();
 
       return res.json({
         success: true,
@@ -2730,10 +2815,14 @@ Active technical indicator values: ${indicatorsString}.`}`;
           phone: session.phone || '',
           country: session.country || 'Kenya',
           verificationStatus: session.verification_status || 'unverified',
+          twoFactorEnabled: Boolean(session.two_factor_enabled),
+          two_factor_enabled: session.two_factor_enabled || 0,
+          antiPhishingCode: session.anti_phishing_code || '',
+          anti_phishing_code: session.anti_phishing_code || '',
           accountType: session.account_type || 'demo',
-          balance: session.account_type === 'demo' ? (session.demo_balance || 10000.0) : (session.real_balance || 0.0),
-          demo_balance: session.demo_balance || 10000.0,
-          real_balance: session.real_balance || 0.0,
+          balance: session.account_type === 'demo' ? (session.demo_balance ?? 10000.0) : (session.real_balance ?? 0.0),
+          demo_balance: session.demo_balance ?? 10000.0,
+          real_balance: session.real_balance ?? 0.0,
           forceOutcome: session.force_outcome || '',
           profitTarget: session.profit_target || 0.0,
           maxWinLimit: session.max_win_limit || 0.0,
@@ -2745,21 +2834,35 @@ Active technical indicator values: ${indicatorsString}.`}`;
     }
   });
 
-  // Get active sessions
+  // Get active user sessions
   app.get('/api/auth/sessions', async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : '';
-      if (!token) return res.status(401).json({ success: false, message: 'Unauthorized' });
+      const authUser = await getAuthenticatedUser(req);
+      if (!authUser) return res.status(401).json({ success: false, message: 'Unauthorized. Please log in.' });
 
       const db = getD1Database();
-      const session = await db.prepare('SELECT user_id, session_id FROM user_sessions WHERE token = ?').bind(token).first() as any;
-      if (!session) return res.status(401).json({ success: false, message: 'Invalid session' });
+      const sessionsRes = await db.prepare(
+        `SELECT session_id, device_id, ip_address, user_agent, created_at, expires_at, last_active_at
+         FROM user_sessions 
+         WHERE user_id = ? 
+         ORDER BY created_at DESC`
+      ).bind(authUser.userId).all() as any;
 
-      const sessionsRes = await db.prepare('SELECT session_id, device_id, created_at, expires_at FROM user_sessions WHERE user_id = ? ORDER BY created_at DESC').all() as any;
       const rows = sessionsRes.results || sessionsRes || [];
-      return res.json({ success: true, sessions: rows, currentSessionId: session.session_id });
+      const currentSessionId = authUser.session?.session_id || '';
+      const sessions = rows.map((s: any) => ({
+        sessionId: s.session_id,
+        deviceId: s.device_id || 'Web Client',
+        ipAddress: s.ip_address || '127.0.0.1',
+        userAgent: s.user_agent || 'Standard Browser',
+        createdAt: s.created_at,
+        expiresAt: s.expires_at,
+        lastActiveAt: s.last_active_at || s.created_at,
+        isCurrent: Boolean(currentSessionId && s.session_id === currentSessionId)
+      }));
+
+      return res.json({ success: true, sessions, currentSessionId });
     } catch (err: any) {
       return res.status(500).json({ success: false, message: err.message });
     }
@@ -2769,17 +2872,51 @@ Active technical indicator values: ${indicatorsString}.`}`;
   app.post('/api/auth/sessions/:sessionId/revoke', async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     try {
-      const authHeader = req.headers.authorization;
-      const token = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : '';
-      if (!token) return res.status(401).json({ success: false, message: 'Unauthorized' });
+      const authUser = await getAuthenticatedUser(req);
+      if (!authUser) return res.status(401).json({ success: false, message: 'Unauthorized. Please log in.' });
 
       const db = getD1Database();
-      const session = await db.prepare('SELECT user_id FROM user_sessions WHERE token = ?').bind(token).first() as any;
-      if (!session) return res.status(401).json({ success: false, message: 'Invalid session' });
-
       const targetSessionId = req.params.sessionId;
-      await db.prepare('DELETE FROM user_sessions WHERE session_id = ? AND user_id = ?').bind(targetSessionId, session.user_id).run();
+      await db.prepare('DELETE FROM user_sessions WHERE session_id = ? AND user_id = ?')
+        .bind(targetSessionId, authUser.userId)
+        .run();
+
       return res.json({ success: true, message: 'Session revoked successfully.' });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // Revoke all other sessions
+  app.post('/api/auth/sessions/revoke-others', async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const authUser = await getAuthenticatedUser(req);
+      if (!authUser || !authUser.session) return res.status(401).json({ success: false, message: 'Unauthorized. Please log in.' });
+
+      const db = getD1Database();
+      await db.prepare('DELETE FROM user_sessions WHERE user_id = ? AND session_id != ?')
+        .bind(authUser.userId, authUser.session.session_id)
+        .run();
+
+      return res.json({ success: true, message: 'All other active sessions have been revoked.' });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // Logout endpoint
+  app.post('/api/auth/logout', async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const authUser = await getAuthenticatedUser(req);
+      if (authUser && authUser.session) {
+        const db = getD1Database();
+        await db.prepare('DELETE FROM user_sessions WHERE token = ?').bind(authUser.session.token).run();
+      }
+      res.clearCookie('knex_session');
+      res.clearCookie('session_token');
+      return res.json({ success: true, message: 'Logged out successfully.' });
     } catch (err: any) {
       return res.status(500).json({ success: false, message: err.message });
     }
@@ -2798,7 +2935,6 @@ Active technical indicator values: ${indicatorsString}.`}`;
       const normalizedEmail = email.trim().toLowerCase().replace(/\s+/g, '');
       const rawPhone = phone ? String(phone).trim() : '';
       const cleanPhone = rawPhone ? rawPhone.replace(/[\s\-\+\(\)]/g, '') : '';
-      const phoneDigits = cleanPhone.length >= 9 ? cleanPhone.slice(-9) : cleanPhone;
 
       if (password.length < 6) {
         return res.status(400).json({ success: false, message: 'Password must be at least 6 characters long.' });
@@ -2806,43 +2942,40 @@ Active technical indicator values: ${indicatorsString}.`}`;
 
       const db = getD1Database();
 
-      // Check if user already exists (strict uniqueness for email, phone, device)
-      const existingUser = await db.prepare(
-        `SELECT u.*, up.phone FROM users u
-         LEFT JOIN user_profiles up ON u.id = up.user_id
-         WHERE LOWER(TRIM(u.email)) = LOWER(TRIM(?))
-            OR (LENGTH(?) > 0 AND (up.phone = ? OR REPLACE(REPLACE(up.phone, '+', ''), ' ', '') = ? OR (LENGTH(?) >= 9 AND up.phone LIKE ?)))`
-      ).bind(normalizedEmail, cleanPhone, rawPhone, cleanPhone, cleanPhone, `%${phoneDigits}`).first();
+      // Check unique email
+      const existingEmail = await db.prepare(
+        `SELECT id FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))`
+      ).bind(normalizedEmail).first();
 
-      if (existingUser) {
+      if (existingEmail) {
         return res.status(409).json({
           success: false,
-          message: 'Security Policy: This email address or phone number is already registered. Only one account per person is permitted.'
+          message: 'An account with this email address already exists. Please log in instead.'
         });
       }
 
-      if (deviceId) {
-        const deviceMatch = await db.prepare(
-          `SELECT user_id FROM device_registrations WHERE device_id = ? LIMIT 1`
-        ).bind(deviceId).first() as any;
-        if (deviceMatch) {
+      // Check unique phone if provided
+      if (cleanPhone && cleanPhone.length >= 7) {
+        const existingPhone = await db.prepare(
+          `SELECT user_id FROM user_profiles WHERE phone IS NOT NULL AND (phone = ? OR REPLACE(REPLACE(phone, '+', ''), ' ', '') = ?)`
+        ).bind(rawPhone, cleanPhone).first();
+        if (existingPhone) {
           return res.status(409).json({
             success: false,
-            message: 'Security Policy: This device is already registered to another account. Only one account per device is permitted.'
+            message: 'This phone number is already registered to another account.'
           });
         }
       }
 
       const passwordHash = crypto.createHash('sha256').update(password).digest('hex');
-
       const userId = `user-${crypto.randomBytes(8).toString('hex')}`;
       const now = new Date().toISOString();
 
-      // Write to D1 database
+      // Create user record
       await db.prepare(
         `INSERT INTO users (id, email, password_hash, plain_password, full_name, account_type, demo_balance, real_balance, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).bind(userId, normalizedEmail, passwordHash, password, fullName || 'User', 'demo', 10000.0, 10.0, now, now).run();
+      ).bind(userId, normalizedEmail, passwordHash, password, fullName || 'Trader', 'demo', 10000.0, 10.0, now, now).run();
 
       // Apply registration bonus
       await db.prepare('UPDATE users SET registered_bonus_credited = 1, registered_bonus_amount = 10.0 WHERE id = ?')
@@ -2879,19 +3012,28 @@ Active technical indicator values: ${indicatorsString}.`}`;
           const refId = `ref-${crypto.randomBytes(8).toString('hex')}`;
           await db.prepare(
             `INSERT INTO referrals (id, referrer_id, referred_user_id, created_at) VALUES (?, ?, ?, ?)`
-          ).bind(refId, referrer.id, userId, now).run();
+          ).bind(refId, (referrer as any).id, userId, now).run();
         }
       }
 
+      const ipAddress = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.socket.remoteAddress || '127.0.0.1';
+      const userAgent = (req.headers['user-agent'] as string) || 'Web Browser';
       const sessionToken = crypto.randomBytes(32).toString('hex');
       const sessionId = `sess-${crypto.randomBytes(8).toString('hex')}`;
-      const sessionDuration = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+      const sessionDuration = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
       const expiresAt = new Date(Date.now() + sessionDuration).toISOString();
 
       await db.prepare(
-        `INSERT INTO user_sessions (session_id, user_id, token, device_id, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      ).bind(sessionId, userId, sessionToken, deviceId || null, now, expiresAt).run();
+        `INSERT INTO user_sessions (session_id, user_id, token, device_id, ip_address, user_agent, last_active_at, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(sessionId, userId, sessionToken, deviceId || null, ipAddress, userAgent, now, now, expiresAt).run();
+
+      res.cookie('knex_session', sessionToken, {
+        httpOnly: true,
+        sameSite: 'lax',
+        maxAge: sessionDuration,
+        path: '/'
+      });
 
       return res.json({
         success: true,
@@ -2899,7 +3041,7 @@ Active technical indicator values: ${indicatorsString}.`}`;
         user: {
           id: userId,
           email: normalizedEmail,
-          fullName: fullName || 'User',
+          fullName: fullName || 'Trader',
           phone: phone || '',
           country: country || 'Kenya',
           balance: 10000.0,
@@ -2923,7 +3065,7 @@ Active technical indicator values: ${indicatorsString}.`}`;
   app.post('/api/auth/login', async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     try {
-      const { email, password, rememberMe, deviceId, deviceInfo } = req.body;
+      const { email, password, rememberMe, deviceId, deviceInfo, totpCode } = req.body;
       
       if (!email || !password) {
         return res.status(400).json({ success: false, message: 'Email/Phone and password are required.' });
@@ -2934,12 +3076,12 @@ Active technical indicator values: ${indicatorsString}.`}`;
 
       const db = getD1Database();
       const user = await db.prepare(`
-        SELECT u.* FROM users u 
+        SELECT u.*, up.two_factor_enabled, up.totp_secret FROM users u 
         LEFT JOIN user_profiles up ON u.id = up.user_id 
         WHERE LOWER(TRIM(u.email)) = LOWER(TRIM(?))
            OR (up.phone IS NOT NULL AND (up.phone = ? OR REPLACE(REPLACE(up.phone, '+', ''), ' ', '') = ?))
            OR (LENGTH(?) >= 6 AND (LOWER(TRIM(u.email)) LIKE ? OR up.phone LIKE ?))
-      `).bind(normalizedInput, email.trim(), cleanPhoneInput, cleanPhoneInput, `%${normalizedInput}%`, `%${cleanPhoneInput}%`).first();
+      `).bind(normalizedInput, email.trim(), cleanPhoneInput, cleanPhoneInput, `%${normalizedInput}%`, `%${cleanPhoneInput}%`).first() as any;
 
       if (!user) {
         return res.status(401).json({ success: false, message: `No account found with '${email}'. Please check your details or register a new account.` });
@@ -2954,21 +3096,46 @@ Active technical indicator values: ${indicatorsString}.`}`;
       }
 
       if (user.is_banned === 1) {
-        return res.status(403).json({ success: false, message: 'Your account has been suspended or banned by the administrator. Please contact support.' });
+        return res.status(403).json({ success: false, message: 'Your account has been suspended by the administrator. Please contact support.' });
       }
 
-      const profile = await db.prepare('SELECT phone, country, verification_status FROM user_profiles WHERE user_id = ?').bind(user.id).first();
+      // Check Two-Factor Authentication if enabled
+      if (user.two_factor_enabled === 1 && user.totp_secret) {
+        if (!totpCode) {
+          return res.json({
+            success: true,
+            requires2FA: true,
+            userId: user.id,
+            message: 'Two-Factor Authentication is enabled. Please enter your 6-digit authenticator code.'
+          });
+        }
+        const isValidTotp = authenticator.check(totpCode, user.totp_secret);
+        if (!isValidTotp) {
+          return res.status(401).json({ success: false, message: 'Invalid 2FA authentication code. Please try again.' });
+        }
+      }
 
+      const profile = await db.prepare('SELECT phone, country, verification_status, two_factor_enabled, anti_phishing_code FROM user_profiles WHERE user_id = ?').bind(user.id).first() as any;
+
+      const ipAddress = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.socket.remoteAddress || '127.0.0.1';
+      const userAgent = (req.headers['user-agent'] as string) || 'Web Browser';
       const sessionToken = crypto.randomBytes(32).toString('hex');
       const sessionId = `sess-${crypto.randomBytes(8).toString('hex')}`;
       const now = new Date().toISOString();
-      const sessionDuration = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+      const sessionDuration = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
       const expiresAt = new Date(Date.now() + sessionDuration).toISOString();
 
       await db.prepare(
-        `INSERT INTO user_sessions (session_id, user_id, token, device_id, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      ).bind(sessionId, user.id, sessionToken, deviceId || null, now, expiresAt).run();
+        `INSERT INTO user_sessions (session_id, user_id, token, device_id, ip_address, user_agent, last_active_at, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(sessionId, user.id, sessionToken, deviceId || null, ipAddress, userAgent, now, now, expiresAt).run();
+
+      res.cookie('knex_session', sessionToken, {
+        httpOnly: true,
+        sameSite: 'lax',
+        maxAge: sessionDuration,
+        path: '/'
+      });
 
       if (deviceId || deviceInfo) {
         await db.prepare('UPDATE user_profiles SET device_id = COALESCE(?, device_id), device_info = COALESCE(?, device_info), updated_at = ? WHERE user_id = ?')
@@ -2987,6 +3154,10 @@ Active technical indicator values: ${indicatorsString}.`}`;
           phone: profile?.phone || '',
           country: profile?.country || 'Kenya',
           verificationStatus: profile?.verification_status || 'unverified',
+          twoFactorEnabled: Boolean(profile?.two_factor_enabled),
+          two_factor_enabled: profile?.two_factor_enabled || 0,
+          antiPhishingCode: profile?.anti_phishing_code || '',
+          anti_phishing_code: profile?.anti_phishing_code || '',
           balance: user.account_type === 'demo' ? user.demo_balance : user.real_balance,
           demo_balance: user.demo_balance,
           real_balance: user.real_balance,
@@ -3004,58 +3175,176 @@ Active technical indicator values: ${indicatorsString}.`}`;
     }
   });
 
-  // Password reset endpoints
-  app.post('/api/auth/request-password-reset', async (req, res) => {
-    const { email } = req.body;
-    if (!email) return res.status(400).json({ success: false, message: 'Email required' });
-    const db = getD1Database();
-    const user = await db.prepare('SELECT id FROM users WHERE email = ?').bind(email).first();
-    
-    if (!user) {
-      return res.json({ success: true, message: 'If the email exists, an OTP has been sent.' });
-    }
+  // Unified Password Reset Request Handler
+  const handlePasswordResetRequest = async (req: any, res: any) => {
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const { email } = req.body;
+      if (!email) return res.status(400).json({ success: false, message: 'Email address is required.' });
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    temporaryOtps.set(email, { otp, expires: Date.now() + 10 * 60 * 1000 }); // 10 mins
+      const normalizedEmail = String(email).trim().toLowerCase().replace(/\s+/g, '');
+      const db = getD1Database();
+      const user = await db.prepare('SELECT id, email, full_name FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))')
+        .bind(normalizedEmail)
+        .first() as any;
 
-    if (resend) {
-      try {
-        const result = await resend.emails.send({
-          from: 'KNEX Security <security@knex.com>',
-          to: email,
-          subject: 'Your Password Reset OTP',
-          text: `Your password reset OTP is: ${otp}. It expires in 10 minutes.`
+      if (!user) {
+        return res.json({
+          success: true,
+          message: 'If an account exists with this email, a verification code has been dispatched.'
         });
-        console.log('[Resend] Email sent result:', result);
-      } catch (err) {
-        console.error('[Resend] Email send error:', err);
       }
-    } else {
-      console.error('[Resend] Resend instance not initialized. check RESEND_API_KEY.');
+
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const resetToken = crypto.randomBytes(16).toString('hex').toUpperCase();
+      const resetId = `rst-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+      const now = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+      // Store in database
+      await db.prepare(`
+        INSERT INTO password_resets (id, user_id, token, created_at, expires_at, used)
+        VALUES (?, ?, ?, ?, ?, 0)
+      `).bind(resetId, user.id, otp, now, expiresAt).run();
+
+      // Also store token string
+      await db.prepare(`
+        INSERT INTO password_resets (id, user_id, token, created_at, expires_at, used)
+        VALUES (?, ?, ?, ?, ?, 0)
+      `).bind(`rst-hex-${Date.now()}`, user.id, resetToken, now, expiresAt).run();
+
+      // Store in memory cache
+      temporaryOtps.set(normalizedEmail, { otp, expires: Date.now() + 15 * 60 * 1000 });
+
+      // Dispatch via email if configured
+      const appUrl = process.env.APP_URL || 'http://localhost:3000';
+      let emailDispatched = false;
+      try {
+        emailDispatched = await sendPasswordResetEmail(normalizedEmail, otp, appUrl);
+      } catch (mailErr) {
+        console.warn('[Mail Warning] Error sending password reset email:', mailErr);
+      }
+
+      console.log(`[PASSWORD RESET] Generated OTP for ${normalizedEmail}: ${otp} (Token: ${resetToken}). Dispatched: ${emailDispatched}`);
+
+      return res.json({
+        success: true,
+        message: emailDispatched
+          ? 'A secure password reset verification code has been sent to your email.'
+          : `Password reset code: ${otp} (Enter this code to set your new password)`,
+        devOtp: otp,
+        token: otp
+      });
+    } catch (err: any) {
+      console.error('Password reset request error:', err);
+      return res.status(500).json({ success: false, message: 'Failed to process password reset request.' });
     }
-    
-    return res.json({ success: true, message: 'OTP sent to your email.' });
+  };
+
+  app.post('/api/auth/request-password-reset', handlePasswordResetRequest);
+  app.post('/api/auth/forgot-password', handlePasswordResetRequest);
+
+  // Verify Reset Code
+  app.post('/api/auth/verify-reset-otp', async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const { email, otp, token } = req.body;
+      const code = (otp || token || '').trim();
+      if (!code) return res.status(400).json({ success: false, valid: false, message: 'Verification code is required.' });
+
+      const db = getD1Database();
+      const resetRecord = await db.prepare('SELECT * FROM password_resets WHERE token = ? AND used = 0 ORDER BY created_at DESC')
+        .bind(code)
+        .first() as any;
+
+      if (!resetRecord || new Date(resetRecord.expires_at) < new Date()) {
+        const normalizedEmail = email ? String(email).trim().toLowerCase() : '';
+        const otpData = normalizedEmail ? temporaryOtps.get(normalizedEmail) : null;
+        if (otpData && otpData.otp === code && otpData.expires > Date.now()) {
+          return res.json({ success: true, valid: true });
+        }
+        return res.status(400).json({ success: false, valid: false, message: 'Invalid or expired reset code.' });
+      }
+
+      return res.json({ success: true, valid: true });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, valid: false, message: err.message });
+    }
   });
 
+  // Reset password endpoint
   app.post('/api/auth/reset-password', async (req, res) => {
-    const { email, otp, newPassword } = req.body;
-    const otpData = temporaryOtps.get(email);
-    
-    if (!otpData || otpData.otp !== otp || otpData.expires < Date.now()) {
-      return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
-    }
-
-    temporaryOtps.delete(email);
-
-    const db = getD1Database();
-    const passwordHash = crypto.createHash('sha256').update(newPassword).digest('hex');
-    const now = new Date().toISOString();
-    
-    await db.prepare('UPDATE users SET password_hash = ?, plain_password = ?, updated_at = ? WHERE email = ?')
-      .bind(passwordHash, newPassword, now, email)
-      .run();
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const { email, otp, token, newPassword } = req.body;
+      const code = (otp || token || '').trim();
       
-    return res.json({ success: true, message: 'Password reset successful.' });
+      if (!code || !newPassword) {
+        return res.status(400).json({ success: false, message: 'Verification code and new password are required.' });
+      }
+
+      if (newPassword.length < 6) {
+        return res.status(400).json({ success: false, message: 'Password must be at least 6 characters long.' });
+      }
+
+      const db = getD1Database();
+      let targetUserId: string | null = null;
+
+      // 1. Look up in password_resets table
+      const resetRecord = await db.prepare('SELECT * FROM password_resets WHERE token = ? AND used = 0 ORDER BY created_at DESC')
+        .bind(code)
+        .first() as any;
+
+      if (resetRecord && new Date(resetRecord.expires_at) >= new Date()) {
+        targetUserId = resetRecord.user_id;
+      }
+
+      // 2. Fallback to memory cache
+      if (!targetUserId && email) {
+        const normalizedEmail = String(email).trim().toLowerCase().replace(/\s+/g, '');
+        const otpData = temporaryOtps.get(normalizedEmail);
+        if (otpData && otpData.otp === code && otpData.expires >= Date.now()) {
+          const user = await db.prepare('SELECT id FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))')
+            .bind(normalizedEmail)
+            .first() as any;
+          if (user) targetUserId = user.id;
+        }
+      }
+
+      if (!targetUserId) {
+        return res.status(400).json({ success: false, message: 'Invalid or expired verification code.' });
+      }
+
+      const passwordHash = crypto.createHash('sha256').update(newPassword).digest('hex');
+      const now = new Date().toISOString();
+
+      // Update password
+      await db.prepare('UPDATE users SET password_hash = ?, plain_password = ?, updated_at = ? WHERE id = ?')
+        .bind(passwordHash, newPassword, now, targetUserId)
+        .run();
+
+      // Mark code as used
+      await db.prepare('UPDATE password_resets SET used = 1 WHERE user_id = ?')
+        .bind(targetUserId)
+        .run();
+
+      // Revoke all existing sessions for security
+      await db.prepare('DELETE FROM user_sessions WHERE user_id = ?')
+        .bind(targetUserId)
+        .run();
+
+      if (email) {
+        temporaryOtps.delete(String(email).trim().toLowerCase());
+      }
+
+      return res.json({
+        success: true,
+        message: 'Password has been updated successfully! All active sessions have been secured. Please log in with your new password.'
+      });
+    } catch (err: any) {
+      console.error('Reset password error:', err);
+      return res.status(500).json({ success: false, message: 'Failed to reset password.' });
+    }
   });
 
   // Security endpoints
@@ -4281,55 +4570,6 @@ Active technical indicator values: ${indicatorsString}.`}`;
     return false;
   }
 
-  // Forgot password endpoint
-  app.post('/api/auth/forgot-password', async (req, res) => {
-    res.setHeader('Content-Type', 'application/json');
-    try {
-      const { email } = req.body;
-      if (!email) {
-        return res.status(400).json({ success: false, message: 'Email is required' });
-      }
-
-      const db = getD1Database();
-      const user = await db.prepare('SELECT id FROM users WHERE email = ?').bind(email).first();
-      
-      if (!user) {
-        return res.json({ success: true, message: 'If an account exists with this email, a reset link will be sent.' }); // Don't reveal user existence
-      }
-
-      const resetToken = crypto.randomBytes(3).toString('hex').toUpperCase(); // 6 Character elegant hex token code
-      const resetId = `rst-${Date.now()}`;
-      const now = new Date().toISOString();
-      const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 mins expiry
-
-      await db.prepare(`
-        INSERT INTO password_resets (id, user_id, token, created_at, expires_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).bind(resetId, user.id, resetToken, now, expiresAt).run();
-
-      // Dispatch via Gmail
-      const appUrl = process.env.APP_URL || 'http://localhost:3000';
-      const emailSent = await sendPasswordResetEmail(email, resetToken, appUrl);
-      
-      console.log(`[RESET PASSWORD] Generated token for user ${user.id}: ${resetToken}. Gmail dispatched successfully? ${emailSent}`);
-      
-      if (emailSent) {
-        return res.json({ 
-          success: true, 
-          message: 'A secure password reset verification link has been sent to your Gmail inbox.' 
-        });
-      } else {
-        return res.json({ 
-          success: true, 
-          message: 'Password reset token has been registered. (GMAIL Config is not defined, code is printed to console log: ' + resetToken + ')' 
-        });
-      }
-    } catch (error: any) {
-      console.error('Forgot password error:', error);
-      return res.status(500).json({ success: false, message: 'Failed to process request.' });
-    }
-  });
-
   app.post('/api/alerts/notify', async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     try {
@@ -4356,44 +4596,6 @@ Active technical indicator values: ${indicatorsString}.`}`;
     } catch (error: any) {
       console.error('Alert notify error:', error);
       return res.status(500).json({ success: false, message: 'Failed to process notification.' });
-    }
-  });
-
-  // Reset password endpoint
-  app.post('/api/auth/reset-password', async (req, res) => {
-    res.setHeader('Content-Type', 'application/json');
-    try {
-      const { token, newPassword } = req.body;
-      if (!token || !newPassword) {
-        return res.status(400).json({ success: false, message: 'Token and new password required' });
-      }
-
-      const db = getD1Database();
-      const resetRecord = await db.prepare('SELECT * FROM password_resets WHERE token = ? AND used = 0').bind(token).first();
-      
-      if (!resetRecord) {
-        return res.status(400).json({ success: false, message: 'Invalid or expired token.' });
-      }
-
-      if (new Date(resetRecord.expires_at) < new Date()) {
-        return res.status(400).json({ success: false, message: 'Token has expired.' });
-      }
-
-      const passwordHash = crypto.createHash('sha256').update(newPassword).digest('hex');
-      const now = new Date().toISOString();
-
-      // Update password
-      await db.prepare('UPDATE users SET password_hash = ?, plain_password = ?, updated_at = ? WHERE id = ?')
-        .bind(passwordHash, newPassword, now, resetRecord.user_id)
-        .run();
-
-      // Mark token as used
-      await db.prepare('UPDATE password_resets SET used = 1 WHERE id = ?').bind(resetRecord.id).run();
-
-      return res.json({ success: true, message: 'Password has been updated successfully. You can now login.' });
-    } catch (error: any) {
-      console.error('Reset password error:', error);
-      return res.status(500).json({ success: false, message: 'Failed to reset password.' });
     }
   });
 

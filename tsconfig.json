@@ -23,5 +23,13 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "exclude": [
+    "node_modules",
+    "dist",
+    "functions",
+    "worker",
+    "temp-repo",
+    "temp-repo2"
+  ]
 }

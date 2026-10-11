@@ -2948,6 +2948,15 @@ export default function App() {
   };
     
   const handleLogout = () => {
+    const token = localStorage.getItem('knex_token');
+    if (token) {
+      fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      }).catch(console.error);
+    }
+    localStorage.removeItem('knex_token');
+    localStorage.removeItem('knex_current_user');
     handleUserUpdate(null);
     window.location.reload();
   };
