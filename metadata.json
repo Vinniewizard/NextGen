@@ -1,0 +1,6 @@
+{
+  "name": "Knex Synthetic Options & Trading Exchange",
+  "description": "A high-performance synthetic options and binary trading platform featuring responsive tick indices, secure escrow, P2P marketplace, and professional analytical tools.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
